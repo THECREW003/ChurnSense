@@ -107,68 +107,97 @@ def generate_risk_explanation(
     active_days: int,
     total_events: int,
     total_purchases: int,
-    average_events_per_active_day: float
+    average_events_per_active_day: float,
+    monthly_value: float = 0.0
 ) -> Tuple[List[str], str]:
     """
-    Generates rule-based feature-driven risk factors and recommended actions.
-    Selects the 2-4 most significant indicators based on actual customer features.
+    Generates rule-based, human-readable feature-driven risk factors (top 2-4)
+    and tailored retention actions based on actual customer feature values and customer value.
     """
     factors = []
 
-    if risk_level == "High":
-        if days_since_last_activity >= 30:
-            factors.append(f"{int(days_since_last_activity)} days elapsed since last activity")
-        if inactive_days >= 50:
-            factors.append(f"Extended inactivity period ({inactive_days} days inactive out of 90)")
-        if active_days <= 25:
-            factors.append(f"Low account active days ({active_days} active days)")
-        if total_events <= 300:
-            factors.append(f"Severely reduced overall engagement ({total_events} total events)")
+    if risk_level in ["High", "Medium"]:
+        # 1. Recency indicator
+        recency_int = int(round(days_since_last_activity))
+        if recency_int >= 14:
+            factors.append(f"{recency_int} days since last activity")
+        elif recency_int >= 7:
+            factors.append(f"{recency_int} days since last activity")
+
+        # 2. Inactive / Active days indicator
+        if active_days <= 15:
+            factors.append(f"Only {active_days} active days")
+        elif inactive_days >= 50:
+            factors.append(f"{inactive_days} days inactive out of 90")
+        elif active_days <= 30:
+            factors.append(f"Low active frequency ({active_days} active days)")
+
+        # 3. Purchase activity indicator
         if total_purchases == 0:
             factors.append("Zero purchases completed")
+        elif total_purchases <= 8:
+            factors.append(f"Low purchase activity ({total_purchases} purchases)")
+        elif total_purchases <= 18 and risk_level == "High":
+            factors.append(f"Low purchase activity ({total_purchases} purchases)")
+
+        # 4. Total volume / Intensity indicator
+        if total_events <= 250:
+            factors.append(f"Low total activity ({total_events} events)")
+        elif average_events_per_active_day < 14.0:
+            factors.append(f"Low session intensity ({average_events_per_active_day:.1f} events/day)")
+        elif total_events <= 500 and len(factors) < 2:
+            factors.append(f"Reduced overall engagement ({total_events} events)")
 
         if len(factors) < 2:
-            factors.append(f"Below average session activity ({average_events_per_active_day:.1f} events/active day)")
+            if recency_int >= 4:
+                factors.append(f"{recency_int} days since last activity")
+            else:
+                factors.append("Declining engagement trend")
 
-        if days_since_last_activity > 45:
-            action = "Send urgent win-back campaign with a 25% discount offer"
+        # Prioritize top 2-4 factors
+        factors = factors[:4]
+
+        # Context-aware action determination
+        is_high_value = monthly_value >= 1499.0
+        
+        if is_high_value and risk_level == "High":
+            action = "Prioritize for direct retention outreach"
+        elif recency_int >= 30:
+            if is_high_value:
+                action = "Prioritize for direct retention outreach & VIP call"
+            else:
+                action = "Send personalized re-engagement offer"
+        elif any("purchase" in f.lower() for f in factors):
+            action = "Offer a personalized promotion"
+        elif recency_int >= 14 or inactive_days >= 45:
+            action = "Send a re-engagement notification"
+        elif active_days <= 25 or total_events <= 400:
+            action = "Send a personalized engagement campaign"
         else:
-            action = "Schedule immediate re-engagement push notification and support call"
-
-    elif risk_level == "Medium":
-        if 10 <= days_since_last_activity < 30:
-            factors.append(f"Moderate inactivity gap ({int(days_since_last_activity)} days since last activity)")
-        if 20 <= active_days <= 50:
-            factors.append(f"Moderate usage frequency ({active_days} active days)")
-        if average_events_per_active_day < 18:
-            factors.append(f"Below average session engagement ({average_events_per_active_day:.1f} events/day)")
-        if total_purchases < 20:
-            factors.append(f"Low purchase count ({total_purchases} total purchases)")
-
-        if len(factors) < 2:
-            factors.append("Declining interaction trends in recent weeks")
-
-        if total_purchases < 10:
             action = "Send targeted product recommendations and loyalty points bonus"
-        else:
-            action = "Send feature highlight newsletter and interactive usage tips"
 
-    else:  # Low risk
-        if days_since_last_activity < 5:
-            factors.append(f"Recent active usage ({days_since_last_activity:.1f} days ago)")
+    else:  # Low Risk (Healthy Customer)
+        recency_val = round(days_since_last_activity, 1)
+        if recency_val <= 3.0:
+            factors.append(f"Active usage within last {recency_val if recency_val > 0 else 1} days")
         if active_days >= 65:
             factors.append(f"High account consistency ({active_days} active days)")
-        if total_purchases >= 50:
+        if total_purchases >= 40:
             factors.append(f"Strong purchase history ({total_purchases} purchases)")
-        if total_events >= 1000:
-            factors.append(f"High total engagement ({total_events} total events)")
+        if total_events >= 900:
+            factors.append(f"High overall engagement ({total_events} total events)")
 
         if len(factors) < 2:
-            factors.append("Consistently active daily log patterns")
+            factors.append("Consistently active usage patterns")
 
-        action = "Enroll in VIP customer loyalty rewards program"
+        factors = factors[:4]
 
-    return factors[:4], action
+        if monthly_value >= 1499.0:
+            action = "Enroll in VIP customer loyalty rewards program"
+        else:
+            action = "Send periodic feature updates and satisfaction survey"
+
+    return factors, action
 
 
 def process_raw_logs_to_features(df_logs: pd.DataFrame, observation_days: int = 90) -> pd.DataFrame:
@@ -340,7 +369,8 @@ def predict_churn(request: PredictRequest):
             active_days=request.active_days,
             total_events=request.total_events,
             total_purchases=request.total_purchases,
-            average_events_per_active_day=request.average_events_per_active_day
+            average_events_per_active_day=request.average_events_per_active_day,
+            monthly_value=monthly_val
         )
 
         return PredictResponse(
@@ -415,7 +445,8 @@ def get_risk_scores():
                 active_days=act_days,
                 total_events=tot_events,
                 total_purchases=tot_purchases,
-                average_events_per_active_day=avg_events
+                average_events_per_active_day=avg_events,
+                monthly_value=m_val
             )
 
             customers.append(CustomerRiskScore(
@@ -549,7 +580,8 @@ async def upload_activity_logs(file: UploadFile = File(...)):
                 active_days=act_days,
                 total_events=tot_events,
                 total_purchases=tot_purchases,
-                average_events_per_active_day=avg_events
+                average_events_per_active_day=avg_events,
+                monthly_value=m_val
             )
 
             customers.append(CustomerRiskScore(
