@@ -1,5 +1,5 @@
 import os
-from typing import List, Optional
+from typing import List, Optional, Tuple
 import joblib
 import pandas as pd
 from fastapi import FastAPI, HTTPException, status
@@ -18,8 +18,8 @@ DATA_PATH = os.path.join(PROJECT_ROOT, "data", "customer_features.csv")
 # Initialize FastAPI app
 app = FastAPI(
     title="ChurnSense Backend API",
-    description="Customer Churn Prediction API powered by Machine Learning",
-    version="1.0.0"
+    description="Customer Churn Prediction & Risk Explanation API powered by Machine Learning",
+    version="1.1.0"
 )
 
 # Enable CORS for frontend integration
@@ -84,6 +84,77 @@ def calculate_risk_level(prob: float) -> str:
         return "High"
 
 
+def generate_risk_explanation(
+    risk_level: str,
+    days_since_last_activity: float,
+    inactive_days: int,
+    active_days: int,
+    total_events: int,
+    total_purchases: int,
+    average_events_per_active_day: float
+) -> Tuple[List[str], str]:
+    """
+    Generates rule-based feature-driven risk factors and recommended actions.
+    Selects the 2-4 most significant indicators based on actual customer features.
+    """
+    factors = []
+
+    if risk_level == "High":
+        if days_since_last_activity >= 30:
+            factors.append(f"{int(days_since_last_activity)} days elapsed since last activity")
+        if inactive_days >= 50:
+            factors.append(f"Extended inactivity period ({inactive_days} days inactive out of 90)")
+        if active_days <= 25:
+            factors.append(f"Low account active days ({active_days} active days)")
+        if total_events <= 300:
+            factors.append(f"Severely reduced overall engagement ({total_events} total events)")
+        if total_purchases == 0:
+            factors.append("Zero purchases completed")
+
+        if len(factors) < 2:
+            factors.append(f"Below average session activity ({average_events_per_active_day:.1f} events/active day)")
+
+        if days_since_last_activity > 45:
+            action = "Send urgent win-back campaign with a 25% discount offer"
+        else:
+            action = "Schedule immediate re-engagement push notification and support call"
+
+    elif risk_level == "Medium":
+        if 10 <= days_since_last_activity < 30:
+            factors.append(f"Moderate inactivity gap ({int(days_since_last_activity)} days since last activity)")
+        if 20 <= active_days <= 50:
+            factors.append(f"Moderate usage frequency ({active_days} active days)")
+        if average_events_per_active_day < 18:
+            factors.append(f"Below average session engagement ({average_events_per_active_day:.1f} events/day)")
+        if total_purchases < 20:
+            factors.append(f"Low purchase count ({total_purchases} total purchases)")
+
+        if len(factors) < 2:
+            factors.append("Declining interaction trends in recent weeks")
+
+        if total_purchases < 10:
+            action = "Send targeted product recommendations and loyalty points bonus"
+        else:
+            action = "Send feature highlight newsletter and interactive usage tips"
+
+    else:  # Low risk
+        if days_since_last_activity < 5:
+            factors.append(f"Recent active usage ({days_since_last_activity:.1f} days ago)")
+        if active_days >= 65:
+            factors.append(f"High account consistency ({active_days} active days)")
+        if total_purchases >= 50:
+            factors.append(f"Strong purchase history ({total_purchases} purchases)")
+        if total_events >= 1000:
+            factors.append(f"High total engagement ({total_events} total events)")
+
+        if len(factors) < 2:
+            factors.append("Consistently active daily log patterns")
+
+        action = "Enroll in VIP customer loyalty rewards program"
+
+    return factors[:4], action
+
+
 # Pydantic Schemas
 class HealthResponse(BaseModel):
     status: str
@@ -106,15 +177,24 @@ class PredictResponse(BaseModel):
     user_id: str
     churn_probability: float
     risk_level: str
+    risk_factors: List[str]
+    recommended_action: str
 
 
 class CustomerRiskScore(BaseModel):
     user_id: str
     churn_probability: float
     risk_level: str
+    risk_factors: List[str]
+    recommended_action: str
+    total_logins: int
+    total_sessions: int
+    total_page_views: int
+    total_purchases: int
     total_events: int
     active_days: int
     inactive_days: int
+    average_events_per_active_day: float
     days_since_last_activity: float
 
 
@@ -133,7 +213,7 @@ def get_health():
 @app.post("/predict", response_model=PredictResponse, tags=["Predictions"])
 def predict_churn(request: PredictRequest):
     """
-    Predict churn probability and risk level for a single customer.
+    Predict churn probability, risk level, and explainable risk factors for a single customer.
     """
     if model is None:
         load_artifacts()
@@ -162,10 +242,22 @@ def predict_churn(request: PredictRequest):
         prob = float(model.predict_proba(features_input)[0][1])
         risk_level = calculate_risk_level(prob)
 
+        factors, action = generate_risk_explanation(
+            risk_level=risk_level,
+            days_since_last_activity=request.days_since_last_activity,
+            inactive_days=request.inactive_days,
+            active_days=request.active_days,
+            total_events=request.total_events,
+            total_purchases=request.total_purchases,
+            average_events_per_active_day=request.average_events_per_active_day
+        )
+
         return PredictResponse(
             user_id=request.user_id,
             churn_probability=round(prob, 4),
-            risk_level=risk_level
+            risk_level=risk_level,
+            risk_factors=factors,
+            recommended_action=action
         )
     except Exception as e:
         raise HTTPException(
@@ -177,7 +269,7 @@ def predict_churn(request: PredictRequest):
 @app.get("/risk-scores", response_model=RiskScoresResponse, tags=["Predictions"])
 def get_risk_scores():
     """
-    Load customer features and return predictions for all users,
+    Load customer features and return predictions and explanations for all users,
     ranked from highest churn probability to lowest.
     """
     if model is None:
@@ -207,14 +299,39 @@ def get_risk_scores():
 
         customers = []
         for _, row in df_sorted.iterrows():
+            r_level = str(row["risk_level"])
+            days_inactive_recency = float(row["days_since_last_activity"])
+            inact_days = int(row["inactive_days"])
+            act_days = int(row["active_days"])
+            tot_events = int(row["total_events"])
+            tot_purchases = int(row["total_purchases"])
+            avg_events = float(row["average_events_per_active_day"])
+
+            factors, action = generate_risk_explanation(
+                risk_level=r_level,
+                days_since_last_activity=days_inactive_recency,
+                inactive_days=inact_days,
+                active_days=act_days,
+                total_events=tot_events,
+                total_purchases=tot_purchases,
+                average_events_per_active_day=avg_events
+            )
+
             customers.append(CustomerRiskScore(
                 user_id=str(row["user_id"]),
                 churn_probability=float(row["churn_probability"]),
-                risk_level=str(row["risk_level"]),
-                total_events=int(row["total_events"]),
-                active_days=int(row["active_days"]),
-                inactive_days=int(row["inactive_days"]),
-                days_since_last_activity=float(row["days_since_last_activity"])
+                risk_level=r_level,
+                risk_factors=factors,
+                recommended_action=action,
+                total_logins=int(row["total_logins"]),
+                total_sessions=int(row["total_sessions"]),
+                total_page_views=int(row["total_page_views"]),
+                total_purchases=tot_purchases,
+                total_events=tot_events,
+                active_days=act_days,
+                inactive_days=inact_days,
+                average_events_per_active_day=avg_events,
+                days_since_last_activity=days_inactive_recency
             ))
 
         return RiskScoresResponse(
