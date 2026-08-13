@@ -10,14 +10,15 @@ def generate_customer_features(
     seed=42
 ):
     """
-    Transforms raw activity logs into user-level features and a realistic,
-    multi-factor probabilistic churn label with feature overlap.
+    Transforms raw activity logs into user-level features, a realistic,
+    multi-factor probabilistic churn label with feature overlap, and
+    synthetic monthly subscription values for Revenue at Risk analysis.
     """
     if not os.path.exists(input_path):
         raise FileNotFoundError(f"Input file not found: {input_path}")
 
     print(f"Loading activity logs from {input_path}...")
-    df = pd.read_csv(input_path)
+    df = pd.read_csv(input_path, engine="python")
 
     df["timestamp"] = pd.to_datetime(df["timestamp"])
     df["date"] = df["timestamp"].dt.date
@@ -66,7 +67,6 @@ def generate_customer_features(
     recent_counts = recent_df.groupby("user_id").size().reindex(features.index, fill_value=0)
 
     # Multi-factor probabilistic churn label calculation
-    # Uses recency, inactivity ratio, activity volume, purchase volume, and recent trend
     random.seed(seed)
     np.random.seed(seed)
 
@@ -75,7 +75,6 @@ def generate_customer_features(
     volume_deficit = 1.0 - (features["active_days"] / 70.0).clip(upper=1.0)
     purchase_deficit = 1.0 - (features["total_purchases"] / 40.0).clip(upper=1.0)
     
-    # Recent trend score (1.0 = sharp drop in recent 30 days activity vs expected baseline)
     expected_recent = features["total_events"] * (30.0 / 90.0)
     recent_ratio = (recent_counts / (expected_recent + 1e-5)).clip(upper=1.5)
     trend_deficit = 1.0 - (recent_ratio / 1.5)
@@ -96,6 +95,12 @@ def generate_customer_features(
     # Churn label threshold
     features["churn"] = (noisy_propensity > 0.52).astype(int)
 
+    # Generate synthetic monthly subscription value (INR: 299, 499, 799, 999, 1499, 2499)
+    price_tiers = [299, 499, 799, 999, 1499, 2499]
+    price_weights = [0.15, 0.25, 0.25, 0.20, 0.10, 0.05]
+    random.seed(seed + 100)
+    features["monthly_value"] = [random.choices(price_tiers, weights=price_weights)[0] for _ in range(len(features))]
+
     # Reset index
     features = features.reset_index().rename(columns={"index": "user_id"})
 
@@ -110,6 +115,7 @@ def generate_customer_features(
         "inactive_days",
         "average_events_per_active_day",
         "days_since_last_activity",
+        "monthly_value",
         "churn"
     ]
     features = features[columns_order]

@@ -1,5 +1,7 @@
 import os
 import io
+import random
+import hashlib
 from typing import List, Optional, Tuple
 import joblib
 import pandas as pd
@@ -19,8 +21,8 @@ DATA_PATH = os.path.join(PROJECT_ROOT, "data", "customer_features.csv")
 # Initialize FastAPI app
 app = FastAPI(
     title="ChurnSense Backend API",
-    description="Customer Churn Prediction & Risk Explanation API powered by Machine Learning",
-    version="1.2.0"
+    description="Customer Churn Prediction, Risk Explanation & Revenue at Risk Analytics API powered by Machine Learning",
+    version="1.3.0"
 )
 
 # Enable CORS for frontend integration
@@ -83,6 +85,19 @@ def calculate_risk_level(prob: float) -> str:
         return "Medium"
     else:
         return "High"
+
+
+def assign_monthly_value(user_id: str, seed: int = 42) -> float:
+    """
+    Deterministically assigns a realistic synthetic monthly subscription value (in INR)
+    to a customer based on user_id and seed.
+    Subscription tiers: ₹299, ₹499, ₹799, ₹999, ₹1499, ₹2499.
+    """
+    price_tiers = [299.0, 499.0, 799.0, 999.0, 1499.0, 2499.0]
+    price_weights = [0.15, 0.25, 0.25, 0.20, 0.10, 0.05]
+    h = int(hashlib.md5(f"{seed}_{user_id}".encode("utf-8")).hexdigest(), 16)
+    rng = random.Random(h)
+    return float(rng.choices(price_tiers, weights=price_weights)[0])
 
 
 def generate_risk_explanation(
@@ -200,6 +215,11 @@ def process_raw_logs_to_features(df_logs: pd.DataFrame, observation_days: int = 
     ).round(2)
 
     features = features.reset_index().rename(columns={"index": "user_id"})
+    
+    # Assign synthetic monthly value if not present in the raw data
+    if "monthly_value" not in features.columns:
+        features["monthly_value"] = [assign_monthly_value(str(uid)) for uid in features["user_id"]]
+
     return features
 
 
@@ -219,12 +239,15 @@ class PredictRequest(BaseModel):
     inactive_days: int = Field(..., ge=0, example=15)
     average_events_per_active_day: float = Field(..., ge=0.0, example=20.0)
     days_since_last_activity: float = Field(..., ge=0.0, example=1.5)
+    monthly_value: Optional[float] = Field(None, description="Monthly customer subscription value in INR", example=999.0)
 
 
 class PredictResponse(BaseModel):
     user_id: str
     churn_probability: float
     risk_level: str
+    monthly_value: float
+    revenue_at_risk: float
     risk_factors: List[str]
     recommended_action: str
 
@@ -233,6 +256,8 @@ class CustomerRiskScore(BaseModel):
     user_id: str
     churn_probability: float
     risk_level: str
+    monthly_value: float
+    revenue_at_risk: float
     risk_factors: List[str]
     recommended_action: str
     total_logins: int
@@ -248,12 +273,22 @@ class CustomerRiskScore(BaseModel):
 
 class RiskScoresResponse(BaseModel):
     total_customers: int
+    total_revenue_at_risk: float
+    high_risk_revenue: float
+    medium_risk_revenue: float
+    low_risk_revenue: float
+    total_monthly_value: float
     customers: List[CustomerRiskScore]
 
 
 class UploadResponse(BaseModel):
     filename: str
     total_customers: int
+    total_revenue_at_risk: float
+    high_risk_revenue: float
+    medium_risk_revenue: float
+    low_risk_revenue: float
+    total_monthly_value: float
     customers: List[CustomerRiskScore]
     message: str
 
@@ -268,7 +303,7 @@ def get_health():
 @app.post("/predict", response_model=PredictResponse, tags=["Predictions"])
 def predict_churn(request: PredictRequest):
     """
-    Predict churn probability, risk level, and explainable risk factors for a single customer.
+    Predict churn probability, risk level, explainable risk factors, and revenue at risk for a single customer.
     """
     if model is None:
         load_artifacts()
@@ -292,7 +327,11 @@ def predict_churn(request: PredictRequest):
             features_input = input_data
 
         prob = float(model.predict_proba(features_input)[0][1])
-        risk_level = calculate_risk_level(prob)
+        churn_prob = round(prob, 4)
+        risk_level = calculate_risk_level(churn_prob)
+        
+        monthly_val = float(request.monthly_value if request.monthly_value is not None else assign_monthly_value(request.user_id))
+        revenue_at_risk = round(churn_prob * monthly_val, 2)
 
         factors, action = generate_risk_explanation(
             risk_level=risk_level,
@@ -306,8 +345,10 @@ def predict_churn(request: PredictRequest):
 
         return PredictResponse(
             user_id=request.user_id,
-            churn_probability=round(prob, 4),
+            churn_probability=churn_prob,
             risk_level=risk_level,
+            monthly_value=monthly_val,
+            revenue_at_risk=revenue_at_risk,
             risk_factors=factors,
             recommended_action=action
         )
@@ -321,7 +362,7 @@ def predict_churn(request: PredictRequest):
 @app.get("/risk-scores", response_model=RiskScoresResponse, tags=["Predictions"])
 def get_risk_scores():
     """
-    Load customer features and return predictions and explanations for all users,
+    Load customer features and return predictions, explanations, and revenue at risk for all users,
     ranked from highest churn probability to lowest.
     """
     if model is None:
@@ -346,6 +387,13 @@ def get_risk_scores():
         df["churn_probability"] = probs.round(4)
         df["risk_level"] = df["churn_probability"].apply(calculate_risk_level)
 
+        if "monthly_value" not in df.columns:
+            df["monthly_value"] = [assign_monthly_value(str(uid)) for uid in df["user_id"]]
+        else:
+            df["monthly_value"] = df["monthly_value"].astype(float)
+
+        df["revenue_at_risk"] = (df["churn_probability"] * df["monthly_value"]).round(2)
+
         df_sorted = df.sort_values(by="churn_probability", ascending=False)
 
         customers = []
@@ -357,6 +405,8 @@ def get_risk_scores():
             tot_events = int(row["total_events"])
             tot_purchases = int(row["total_purchases"])
             avg_events = float(row["average_events_per_active_day"])
+            m_val = float(row["monthly_value"])
+            rev_at_risk = float(row["revenue_at_risk"])
 
             factors, action = generate_risk_explanation(
                 risk_level=r_level,
@@ -372,6 +422,8 @@ def get_risk_scores():
                 user_id=str(row["user_id"]),
                 churn_probability=float(row["churn_probability"]),
                 risk_level=r_level,
+                monthly_value=m_val,
+                revenue_at_risk=rev_at_risk,
                 risk_factors=factors,
                 recommended_action=action,
                 total_logins=int(row["total_logins"]),
@@ -385,8 +437,19 @@ def get_risk_scores():
                 days_since_last_activity=days_inactive_recency
             ))
 
+        total_rev_at_risk = round(sum(c.revenue_at_risk for c in customers), 2)
+        high_risk_rev = round(sum(c.revenue_at_risk for c in customers if c.risk_level == "High"), 2)
+        medium_risk_rev = round(sum(c.revenue_at_risk for c in customers if c.risk_level == "Medium"), 2)
+        low_risk_rev = round(sum(c.revenue_at_risk for c in customers if c.risk_level == "Low"), 2)
+        total_monthly_val = round(sum(c.monthly_value for c in customers), 2)
+
         return RiskScoresResponse(
             total_customers=len(customers),
+            total_revenue_at_risk=total_rev_at_risk,
+            high_risk_revenue=high_risk_rev,
+            medium_risk_revenue=medium_risk_rev,
+            low_risk_revenue=low_risk_rev,
+            total_monthly_value=total_monthly_val,
             customers=customers
         )
     except Exception as e:
@@ -401,7 +464,7 @@ async def upload_activity_logs(file: UploadFile = File(...)):
     """
     Accepts a user-uploaded CSV file containing activity logs (user_id, event, timestamp),
     validates format/columns, extracts customer features, evaluates ML model predictions,
-    and returns ranked churn risk scores without overwriting original dataset files.
+    and returns ranked churn risk scores and revenue at risk without overwriting original dataset files.
     """
     if model is None:
         load_artifacts()
@@ -458,6 +521,13 @@ async def upload_activity_logs(file: UploadFile = File(...)):
         features_df["churn_probability"] = probs.round(4)
         features_df["risk_level"] = features_df["churn_probability"].apply(calculate_risk_level)
 
+        if "monthly_value" not in features_df.columns:
+            features_df["monthly_value"] = [assign_monthly_value(str(uid)) for uid in features_df["user_id"]]
+        else:
+            features_df["monthly_value"] = features_df["monthly_value"].astype(float)
+
+        features_df["revenue_at_risk"] = (features_df["churn_probability"] * features_df["monthly_value"]).round(2)
+
         df_sorted = features_df.sort_values(by="churn_probability", ascending=False)
 
         customers = []
@@ -469,6 +539,8 @@ async def upload_activity_logs(file: UploadFile = File(...)):
             tot_events = int(row["total_events"])
             tot_purchases = int(row["total_purchases"])
             avg_events = float(row["average_events_per_active_day"])
+            m_val = float(row["monthly_value"])
+            rev_at_risk = float(row["revenue_at_risk"])
 
             factors, action = generate_risk_explanation(
                 risk_level=r_level,
@@ -484,6 +556,8 @@ async def upload_activity_logs(file: UploadFile = File(...)):
                 user_id=str(row["user_id"]),
                 churn_probability=float(row["churn_probability"]),
                 risk_level=r_level,
+                monthly_value=m_val,
+                revenue_at_risk=rev_at_risk,
                 risk_factors=factors,
                 recommended_action=action,
                 total_logins=int(row["total_logins"]),
@@ -497,9 +571,20 @@ async def upload_activity_logs(file: UploadFile = File(...)):
                 days_since_last_activity=days_inactive_recency
             ))
 
+        total_rev_at_risk = round(sum(c.revenue_at_risk for c in customers), 2)
+        high_risk_rev = round(sum(c.revenue_at_risk for c in customers if c.risk_level == "High"), 2)
+        medium_risk_rev = round(sum(c.revenue_at_risk for c in customers if c.risk_level == "Medium"), 2)
+        low_risk_rev = round(sum(c.revenue_at_risk for c in customers if c.risk_level == "Low"), 2)
+        total_monthly_val = round(sum(c.monthly_value for c in customers), 2)
+
         return UploadResponse(
             filename=file.filename,
             total_customers=len(customers),
+            total_revenue_at_risk=total_rev_at_risk,
+            high_risk_revenue=high_risk_rev,
+            medium_risk_revenue=medium_risk_rev,
+            low_risk_revenue=low_risk_rev,
+            total_monthly_value=total_monthly_val,
             customers=customers,
             message=f"Successfully analyzed {len(customers)} customers from {file.filename}."
         )
@@ -511,3 +596,4 @@ async def upload_activity_logs(file: UploadFile = File(...)):
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error processing CSV: {str(e)}"
         )
+

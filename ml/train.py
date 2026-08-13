@@ -24,8 +24,8 @@ def train_and_evaluate():
     print(f"Loading dataset from {data_path}...")
     df = pd.read_csv(data_path)
 
-    # 1. Feature matrix X (excluding user_id and churn) and target vector y
-    feature_cols = [col for col in df.columns if col not in ["user_id", "churn"]]
+    # 1. Feature matrix X (excluding user_id, churn, and monthly_value) and target vector y
+    feature_cols = [col for col in df.columns if col not in ["user_id", "churn", "monthly_value"]]
     X = df[feature_cols]
     y = df["churn"]
 

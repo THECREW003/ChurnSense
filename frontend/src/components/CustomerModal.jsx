@@ -14,7 +14,8 @@ import {
   AlertTriangle,
   AlertCircle,
   HelpCircle,
-  Sparkles
+  Sparkles,
+  IndianRupee
 } from 'lucide-react';
 
 export default function CustomerModal({ customer, onClose }) {
@@ -27,6 +28,14 @@ export default function CustomerModal({ customer, onClose }) {
     setTimeout(() => {
       setToastMessage(null);
     }, 3500);
+  };
+
+  const formatCurrency = (val) => {
+    if (val === undefined || val === null || isNaN(val)) return '₹0';
+    return '₹' + Number(val).toLocaleString('en-IN', {
+      minimumFractionDigits: 0,
+      maximumFractionDigits: 2
+    });
   };
 
   const getRiskBadgeClass = (risk) => {
@@ -110,7 +119,7 @@ export default function CustomerModal({ customer, onClose }) {
           borderRadius: '14px',
           background: 'rgba(15, 23, 42, 0.6)',
           border: '1px solid rgba(255, 255, 255, 0.06)',
-          marginBottom: '24px'
+          marginBottom: '20px'
         }}>
           <div style={{ display: 'flex', justifyContent: 'space-between', marginBottom: '8px' }}>
             <span style={{ fontSize: '0.9rem', color: '#cbd5e1', fontWeight: 500 }}>Predicted Churn Probability</span>
@@ -131,6 +140,57 @@ export default function CustomerModal({ customer, onClose }) {
               borderRadius: '5px',
               transition: 'width 0.4s ease'
             }} />
+          </div>
+        </div>
+
+        {/* Financial Exposure & Revenue at Risk Card */}
+        <div style={{
+          padding: '20px',
+          borderRadius: '14px',
+          background: 'rgba(15, 23, 42, 0.6)',
+          border: '1px solid rgba(255, 255, 255, 0.1)',
+          marginBottom: '24px'
+        }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '14px' }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <IndianRupee size={18} color="#818cf8" />
+              <h3 style={{ fontSize: '1rem', fontWeight: 600, color: '#f8fafc' }}>
+                Financial Exposure Analysis
+              </h3>
+            </div>
+            <span style={{ fontSize: '0.75rem', padding: '3px 8px', borderRadius: '6px', background: 'rgba(99, 102, 241, 0.15)', color: '#a5b4fc', border: '1px solid rgba(99, 102, 241, 0.3)' }}>
+              Demo Estimate
+            </span>
+          </div>
+
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '12px', marginBottom: '12px' }}>
+            <div style={{ padding: '12px', borderRadius: '10px', background: 'rgba(30, 41, 59, 0.5)', border: '1px solid var(--border-color)' }}>
+              <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginBottom: '4px' }}>Monthly Subscription Tier</div>
+              <div style={{ fontSize: '1.25rem', fontWeight: 700, color: '#f8fafc' }}>
+                {formatCurrency(customer.monthly_value)}
+                <span style={{ fontSize: '0.75rem', color: '#64748b', fontWeight: 400 }}> / month</span>
+              </div>
+            </div>
+
+            <div style={{
+              padding: '12px',
+              borderRadius: '10px',
+              background: customer.risk_level === 'High' ? 'rgba(239, 68, 68, 0.12)' : customer.risk_level === 'Medium' ? 'rgba(245, 158, 11, 0.12)' : 'rgba(16, 185, 129, 0.12)',
+              border: `1px solid ${customer.risk_level === 'High' ? 'rgba(239, 68, 68, 0.3)' : customer.risk_level === 'Medium' ? 'rgba(245, 158, 11, 0.3)' : 'rgba(16, 185, 129, 0.3)'}`
+            }}>
+              <div style={{ fontSize: '0.75rem', color: '#94a3b8', marginBottom: '4px' }}>Revenue at Risk</div>
+              <div style={{
+                fontSize: '1.25rem',
+                fontWeight: 700,
+                color: customer.risk_level === 'High' ? '#fca5a5' : customer.risk_level === 'Medium' ? '#fde68a' : '#6ee7b7'
+              }}>
+                {formatCurrency(customer.revenue_at_risk)}
+              </div>
+            </div>
+          </div>
+
+          <div style={{ fontSize: '0.75rem', color: '#94a3b8', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+            <span>Formula: {probPercent}% × {formatCurrency(customer.monthly_value)} = {formatCurrency(customer.revenue_at_risk)}</span>
           </div>
         </div>
 
