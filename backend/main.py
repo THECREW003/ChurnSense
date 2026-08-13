@@ -1,8 +1,9 @@
 import os
+import io
 from typing import List, Optional, Tuple
 import joblib
 import pandas as pd
-from fastapi import FastAPI, HTTPException, status
+from fastapi import FastAPI, HTTPException, status, UploadFile, File
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 
@@ -19,7 +20,7 @@ DATA_PATH = os.path.join(PROJECT_ROOT, "data", "customer_features.csv")
 app = FastAPI(
     title="ChurnSense Backend API",
     description="Customer Churn Prediction & Risk Explanation API powered by Machine Learning",
-    version="1.1.0"
+    version="1.2.0"
 )
 
 # Enable CORS for frontend integration
@@ -155,6 +156,53 @@ def generate_risk_explanation(
     return factors[:4], action
 
 
+def process_raw_logs_to_features(df_logs: pd.DataFrame, observation_days: int = 90) -> pd.DataFrame:
+    """
+    Transforms raw activity logs DataFrame (user_id, timestamp, event)
+    into user-level features matching ChurnSense feature engineering specs.
+    """
+    df = df_logs.copy()
+    df["timestamp"] = pd.to_datetime(df["timestamp"])
+    df["date"] = df["timestamp"].dt.date
+    dataset_max_date = df["timestamp"].max()
+
+    user_groups = df.groupby("user_id")
+
+    event_counts = df.pivot_table(
+        index="user_id",
+        columns="event",
+        aggfunc="size",
+        fill_value=0
+    )
+
+    for evt in ["login", "session", "page_view", "purchase"]:
+        if evt not in event_counts.columns:
+            event_counts[evt] = 0
+
+    features = pd.DataFrame(index=user_groups.groups.keys())
+
+    features["total_logins"] = event_counts["login"]
+    features["total_sessions"] = event_counts["session"]
+    features["total_page_views"] = event_counts["page_view"]
+    features["total_purchases"] = event_counts["purchase"]
+    features["total_events"] = user_groups.size()
+
+    features["active_days"] = user_groups["date"].nunique()
+    features["inactive_days"] = observation_days - features["active_days"]
+
+    features["average_events_per_active_day"] = (
+        features["total_events"] / features["active_days"]
+    ).round(2)
+
+    last_activity = user_groups["timestamp"].max()
+    features["days_since_last_activity"] = (
+        (dataset_max_date - last_activity).dt.total_seconds() / 86400.0
+    ).round(2)
+
+    features = features.reset_index().rename(columns={"index": "user_id"})
+    return features
+
+
 # Pydantic Schemas
 class HealthResponse(BaseModel):
     status: str
@@ -203,6 +251,13 @@ class RiskScoresResponse(BaseModel):
     customers: List[CustomerRiskScore]
 
 
+class UploadResponse(BaseModel):
+    filename: str
+    total_customers: int
+    customers: List[CustomerRiskScore]
+    message: str
+
+
 # API Endpoints
 @app.get("/health", response_model=HealthResponse, tags=["Health"])
 def get_health():
@@ -219,7 +274,6 @@ def predict_churn(request: PredictRequest):
         load_artifacts()
 
     try:
-        # Prepare feature vector in exact column order
         input_data = pd.DataFrame([{
             "total_logins": request.total_logins,
             "total_sessions": request.total_sessions,
@@ -232,13 +286,11 @@ def predict_churn(request: PredictRequest):
             "days_since_last_activity": request.days_since_last_activity
         }])[feature_cols]
 
-        # Apply scaling if required by model metadata or scaler present
         if metadata and metadata.get("requires_scaling", False) and scaler is not None:
             features_input = scaler.transform(input_data)
         else:
             features_input = input_data
 
-        # Predict probability of churn (class 1)
         prob = float(model.predict_proba(features_input)[0][1])
         risk_level = calculate_risk_level(prob)
 
@@ -294,7 +346,6 @@ def get_risk_scores():
         df["churn_probability"] = probs.round(4)
         df["risk_level"] = df["churn_probability"].apply(calculate_risk_level)
 
-        # Sort descending by churn_probability
         df_sorted = df.sort_values(by="churn_probability", ascending=False)
 
         customers = []
@@ -342,4 +393,121 @@ def get_risk_scores():
         raise HTTPException(
             status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
             detail=f"Error generating risk scores: {str(e)}"
+        )
+
+
+@app.post("/upload", response_model=UploadResponse, tags=["Predictions"])
+async def upload_activity_logs(file: UploadFile = File(...)):
+    """
+    Accepts a user-uploaded CSV file containing activity logs (user_id, event, timestamp),
+    validates format/columns, extracts customer features, evaluates ML model predictions,
+    and returns ranked churn risk scores without overwriting original dataset files.
+    """
+    if model is None:
+        load_artifacts()
+
+    # 1. Check file extension
+    if not file.filename.endswith(".csv"):
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Invalid file type. Only .csv files are supported."
+        )
+
+    try:
+        content = await file.read()
+        if not content or len(content.strip()) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="The uploaded CSV file is empty."
+            )
+
+        # 2. Parse CSV
+        try:
+            df_logs = pd.read_csv(io.BytesIO(content))
+        except Exception:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Failed to parse CSV file. Ensure it is a valid comma-separated text file."
+            )
+
+        # 3. Validate required columns
+        required_cols = {"user_id", "event", "timestamp"}
+        missing_cols = required_cols - set(df_logs.columns)
+        if missing_cols:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Missing required CSV columns: {', '.join(sorted(missing_cols))}. Uploaded file must contain: user_id, event, timestamp."
+            )
+
+        if len(df_logs) == 0:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail="Uploaded CSV file contains 0 rows of data."
+            )
+
+        # 4. Extract user-level features without overwriting disk datasets
+        features_df = process_raw_logs_to_features(df_logs)
+        X = features_df[feature_cols]
+
+        if metadata and metadata.get("requires_scaling", False) and scaler is not None:
+            X_input = scaler.transform(X)
+        else:
+            X_input = X
+
+        probs = model.predict_proba(X_input)[:, 1]
+        features_df["churn_probability"] = probs.round(4)
+        features_df["risk_level"] = features_df["churn_probability"].apply(calculate_risk_level)
+
+        df_sorted = features_df.sort_values(by="churn_probability", ascending=False)
+
+        customers = []
+        for _, row in df_sorted.iterrows():
+            r_level = str(row["risk_level"])
+            days_inactive_recency = float(row["days_since_last_activity"])
+            inact_days = int(row["inactive_days"])
+            act_days = int(row["active_days"])
+            tot_events = int(row["total_events"])
+            tot_purchases = int(row["total_purchases"])
+            avg_events = float(row["average_events_per_active_day"])
+
+            factors, action = generate_risk_explanation(
+                risk_level=r_level,
+                days_since_last_activity=days_inactive_recency,
+                inactive_days=inact_days,
+                active_days=act_days,
+                total_events=tot_events,
+                total_purchases=tot_purchases,
+                average_events_per_active_day=avg_events
+            )
+
+            customers.append(CustomerRiskScore(
+                user_id=str(row["user_id"]),
+                churn_probability=float(row["churn_probability"]),
+                risk_level=r_level,
+                risk_factors=factors,
+                recommended_action=action,
+                total_logins=int(row["total_logins"]),
+                total_sessions=int(row["total_sessions"]),
+                total_page_views=int(row["total_page_views"]),
+                total_purchases=tot_purchases,
+                total_events=tot_events,
+                active_days=act_days,
+                inactive_days=inact_days,
+                average_events_per_active_day=avg_events,
+                days_since_last_activity=days_inactive_recency
+            ))
+
+        return UploadResponse(
+            filename=file.filename,
+            total_customers=len(customers),
+            customers=customers,
+            message=f"Successfully analyzed {len(customers)} customers from {file.filename}."
+        )
+
+    except HTTPException:
+        raise
+    except Exception as e:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Error processing CSV: {str(e)}"
         )

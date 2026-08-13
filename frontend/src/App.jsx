@@ -1,4 +1,4 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import {
   Users,
   AlertTriangle,
@@ -6,11 +6,14 @@ import {
   CheckCircle,
   Search,
   RefreshCw,
-  SlidersHorizontal,
-  ChevronRight,
   Sparkles,
   ServerOff,
-  BarChart2
+  Upload,
+  FileSpreadsheet,
+  RotateCcw,
+  CheckCircle2,
+  XCircle,
+  FileText
 } from 'lucide-react';
 import RiskChart from './components/RiskChart';
 import CustomerModal from './components/CustomerModal';
@@ -23,6 +26,16 @@ export default function App() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState(null);
   
+  // Custom CSV Upload state
+  const [isCustomDataset, setIsCustomDataset] = useState(false);
+  const [datasetFilename, setDatasetFilename] = useState('');
+  const [uploading, setUploading] = useState(false);
+  const [uploadSuccessMsg, setUploadSuccessMsg] = useState(null);
+  const [uploadErrorMsg, setUploadErrorMsg] = useState(null);
+  const [isDragOver, setIsDragOver] = useState(false);
+
+  const fileInputRef = useRef(null);
+
   // Filter & Search states
   const [searchTerm, setSearchTerm] = useState('');
   const [selectedFilter, setSelectedFilter] = useState('All');
@@ -30,10 +43,11 @@ export default function App() {
   // Selected customer for modal inspection
   const [selectedCustomer, setSelectedCustomer] = useState(null);
 
-  // Fetch risk scores from backend API
-  const fetchRiskScores = async () => {
+  // Fetch demo risk scores from backend API
+  const fetchDemoData = async () => {
     setLoading(true);
     setError(null);
+    setUploadErrorMsg(null);
     try {
       const response = await fetch(`${API_URL}/risk-scores`);
       if (!response.ok) {
@@ -41,6 +55,9 @@ export default function App() {
       }
       const data = await response.json();
       setCustomers(data.customers || []);
+      setIsCustomDataset(false);
+      setDatasetFilename('');
+      setUploadSuccessMsg(null);
     } catch (err) {
       console.error("Failed to fetch risk scores:", err);
       setError(`Unable to connect to ChurnSense API at ${API_URL}. Please verify the FastAPI backend server is running.`);
@@ -50,8 +67,69 @@ export default function App() {
   };
 
   useEffect(() => {
-    fetchRiskScores();
+    fetchDemoData();
   }, []);
+
+  // Handle CSV Upload to POST /upload
+  const handleFileUpload = async (file) => {
+    if (!file) return;
+
+    if (!file.name.endsWith('.csv')) {
+      setUploadErrorMsg("Invalid file format. Please upload a valid .csv file.");
+      return;
+    }
+
+    setUploading(true);
+    setUploadErrorMsg(null);
+    setUploadSuccessMsg(null);
+
+    const formData = new FormData();
+    formData.append('file', file);
+
+    try {
+      const response = await fetch(`${API_URL}/upload`, {
+        method: 'POST',
+        body: formData,
+      });
+
+      const data = await response.json();
+
+      if (!response.ok) {
+        throw new Error(data.detail || "Failed to process CSV file.");
+      }
+
+      setCustomers(data.customers || []);
+      setIsCustomDataset(true);
+      setDatasetFilename(data.filename || file.name);
+      setUploadSuccessMsg(`✓ ${data.total_customers} customers analyzed successfully from ${data.filename || file.name}`);
+      setError(null);
+    } catch (err) {
+      console.error("CSV Upload failed:", err);
+      setUploadErrorMsg(err.message || "An error occurred while uploading the file.");
+    } finally {
+      setUploading(false);
+      if (fileInputRef.current) {
+        fileInputRef.current.value = "";
+      }
+    }
+  };
+
+  const handleDragOver = (e) => {
+    e.preventDefault();
+    setIsDragOver(true);
+  };
+
+  const handleDragLeave = () => {
+    setIsDragOver(false);
+  };
+
+  const handleDrop = (e) => {
+    e.preventDefault();
+    setIsDragOver(false);
+    if (e.dataTransfer.files && e.dataTransfer.files[0]) {
+      handleFileUpload(e.dataTransfer.files[0]);
+    }
+  };
 
   // Compute KPI summary metrics
   const totalCustomers = customers.length;
@@ -114,10 +192,33 @@ export default function App() {
             </div>
           </div>
 
-          <div style={{ display: 'flex', alignItems: 'center', gap: '16px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+            {isCustomDataset && (
+              <button
+                onClick={fetchDemoData}
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '6px',
+                  padding: '8px 14px',
+                  borderRadius: '8px',
+                  background: 'rgba(239, 68, 68, 0.15)',
+                  border: '1px solid rgba(239, 68, 68, 0.3)',
+                  color: '#fca5a5',
+                  fontSize: '0.85rem',
+                  fontWeight: 600,
+                  cursor: 'pointer',
+                  transition: 'all 0.2s'
+                }}
+              >
+                <RotateCcw size={14} />
+                <span>Reset to Demo Data</span>
+              </button>
+            )}
+
             <button
-              onClick={fetchRiskScores}
-              disabled={loading}
+              onClick={fetchDemoData}
+              disabled={loading || uploading}
               style={{
                 display: 'flex',
                 alignItems: 'center',
@@ -129,7 +230,7 @@ export default function App() {
                 color: '#e2e8f0',
                 fontSize: '0.85rem',
                 fontWeight: 500,
-                cursor: loading ? 'not-allowed' : 'pointer',
+                cursor: (loading || uploading) ? 'not-allowed' : 'pointer',
                 transition: 'all 0.2s'
               }}
               onMouseOver={(e) => e.currentTarget.style.background = 'rgba(51, 65, 85, 0.8)'}
@@ -144,6 +245,123 @@ export default function App() {
 
       {/* Main Container */}
       <main style={{ flex: 1, maxWidth: '1280px', width: '100%', margin: '0 auto', padding: '32px 24px' }}>
+        
+        {/* CSV Upload Banner Section */}
+        <div className="glass-card" style={{ padding: '24px', marginBottom: '28px' }}>
+          <div style={{ display: 'flex', flexWrap: 'wrap', justifyContent: 'space-between', alignItems: 'center', gap: '20px' }}>
+            <div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '10px', marginBottom: '6px' }}>
+                <FileSpreadsheet size={22} color="#818cf8" />
+                <h3 style={{ fontSize: '1.1rem', fontWeight: 600, color: '#f8fafc' }}>
+                  Upload Activity Logs CSV
+                </h3>
+                {isCustomDataset && (
+                  <span className="badge badge-medium" style={{ background: 'rgba(99, 102, 241, 0.2)', color: '#c084fc', border: '1px solid rgba(99, 102, 241, 0.4)' }}>
+                    Active Dataset: {datasetFilename}
+                  </span>
+                )}
+              </div>
+              <p style={{ fontSize: '0.85rem', color: '#94a3b8' }}>
+                Upload custom customer activity logs (`.csv` containing <code style={{ color: '#a5b4fc' }}>user_id</code>, <code style={{ color: '#a5b4fc' }}>event</code>, <code style={{ color: '#a5b4fc' }}>timestamp</code>) to evaluate live predictions.
+              </p>
+            </div>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <input
+                type="file"
+                ref={fileInputRef}
+                accept=".csv"
+                style={{ display: 'none' }}
+                onChange={(e) => {
+                  if (e.target.files && e.target.files[0]) {
+                    handleFileUpload(e.target.files[0]);
+                  }
+                }}
+              />
+
+              <div
+                onDragOver={handleDragOver}
+                onDragLeave={handleDragLeave}
+                onDrop={handleDrop}
+                onClick={() => fileInputRef.current && fileInputRef.current.click()}
+                style={{
+                  border: `2px dashed ${isDragOver ? '#818cf8' : 'rgba(99, 102, 241, 0.4)'}`,
+                  background: isDragOver ? 'rgba(99, 102, 241, 0.15)' : 'rgba(99, 102, 241, 0.08)',
+                  padding: '12px 24px',
+                  borderRadius: '10px',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '10px',
+                  cursor: uploading ? 'not-allowed' : 'pointer',
+                  transition: 'all 0.2s'
+                }}
+              >
+                <Upload size={18} color="#818cf8" />
+                <span style={{ fontSize: '0.88rem', fontWeight: 600, color: '#e0e7ff' }}>
+                  {uploading ? 'Processing & Analyzing ML Features...' : 'Upload CSV / Drag & Drop'}
+                </span>
+              </div>
+
+              {isCustomDataset && (
+                <button
+                  onClick={fetchDemoData}
+                  style={{
+                    padding: '10px 16px',
+                    borderRadius: '10px',
+                    background: 'rgba(239, 68, 68, 0.12)',
+                    border: '1px solid rgba(239, 68, 68, 0.3)',
+                    color: '#fca5a5',
+                    fontSize: '0.85rem',
+                    fontWeight: 600,
+                    cursor: 'pointer'
+                  }}
+                >
+                  Reset Demo
+                </button>
+              )}
+            </div>
+          </div>
+
+          {/* Upload Success Message */}
+          {uploadSuccessMsg && (
+            <div style={{
+              marginTop: '16px',
+              padding: '12px 16px',
+              borderRadius: '8px',
+              background: 'rgba(16, 185, 129, 0.12)',
+              border: '1px solid rgba(16, 185, 129, 0.3)',
+              color: '#6ee7b7',
+              fontSize: '0.88rem',
+              fontWeight: 600,
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px'
+            }}>
+              <CheckCircle2 size={18} />
+              <span>{uploadSuccessMsg}</span>
+            </div>
+          )}
+
+          {/* Upload Error Message */}
+          {uploadErrorMsg && (
+            <div style={{
+              marginTop: '16px',
+              padding: '12px 16px',
+              borderRadius: '8px',
+              background: 'rgba(239, 68, 68, 0.12)',
+              border: '1px solid rgba(239, 68, 68, 0.3)',
+              color: '#fca5a5',
+              fontSize: '0.88rem',
+              fontWeight: 600,
+              display: 'flex',
+              alignItems: 'center',
+              gap: '10px'
+            }}>
+              <XCircle size={18} />
+              <span>{uploadErrorMsg}</span>
+            </div>
+          )}
+        </div>
         
         {/* Loading State */}
         {loading && (
@@ -168,7 +386,7 @@ export default function App() {
             <h3 style={{ fontSize: '1.2rem', color: '#fca5a5', marginBottom: '8px' }}>Backend API Unavailable</h3>
             <p style={{ color: '#94a3b8', maxWidth: '500px', margin: '0 auto 24px auto', fontSize: '0.9rem' }}>{error}</p>
             <button
-              onClick={fetchRiskScores}
+              onClick={fetchDemoData}
               style={{
                 padding: '10px 24px',
                 borderRadius: '8px',
@@ -203,7 +421,9 @@ export default function App() {
                 <div style={{ fontSize: '2rem', fontWeight: 700, color: '#f8fafc', marginTop: '12px' }}>
                   {totalCustomers}
                 </div>
-                <div style={{ fontSize: '0.75rem', color: '#64748b', marginTop: '4px' }}>Analyzed over 90-day window</div>
+                <div style={{ fontSize: '0.75rem', color: '#64748b', marginTop: '4px' }}>
+                  {isCustomDataset ? `Analyzed from ${datasetFilename}` : 'Analyzed over 90-day window'}
+                </div>
               </div>
 
               {/* Card 2: High Risk */}
@@ -278,7 +498,9 @@ export default function App() {
               }}>
                 <div>
                   <h3 style={{ fontSize: '1.1rem', fontWeight: 600, color: '#f8fafc' }}>Customer Churn Ranking</h3>
-                  <p style={{ fontSize: '0.85rem', color: '#94a3b8' }}>Ranked by highest probability of churn (ML Model Output)</p>
+                  <p style={{ fontSize: '0.85rem', color: '#94a3b8' }}>
+                    {isCustomDataset ? `Model predictions for uploaded ${datasetFilename}` : 'Ranked by highest probability of churn (ML Model Output)'}
+                  </p>
                 </div>
 
                 <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '12px' }}>
@@ -424,7 +646,6 @@ export default function App() {
                                 onMouseOut={(e) => e.currentTarget.style.background = 'rgba(99, 102, 241, 0.12)'}
                               >
                                 <span>Details & Actions</span>
-                                <ChevronRight size={14} />
                               </button>
                             </td>
                           </tr>
