@@ -185,7 +185,7 @@ def get_risk_scores():
 
     if not os.path.exists(DATA_PATH):
         raise HTTPException(
-            status_code=status.HTTP_444_NOT_FOUND if hasattr(status, 'HTTP_444_NOT_FOUND') else 404,
+            status_code=status.HTTP_404_NOT_FOUND,
             detail=f"Customer features file not found at {DATA_PATH}."
         )
 
